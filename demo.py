@@ -8,9 +8,11 @@ from __future__ import division
 from __future__ import print_function
 
 import _init_paths
+import tqdm
 import os
 import sys
 import numpy as np
+import json
 import argparse
 import pprint
 import pdb
@@ -68,9 +70,16 @@ def parse_args():
   parser.add_argument('--image_dir', dest='image_dir',
                       help='directory to load images for demo',
                       default="images")
+  parser.add_argument('--mp4',
+                    action='store_true')
+  parser.add_argument('--debug',
+                    action='store_true')
+  parser.add_argument('--mp4_file',
+                    help='directory to load video for demo',
+                    default="data/video/clip.mp4")
   parser.add_argument('--save_dir', dest='save_dir',
                       help='directory to save results',
-                      default="images_det")
+                      default="results/images_det")
   parser.add_argument('--cuda', dest='cuda', 
                       help='whether use CUDA',
                       action='store_true')
@@ -91,7 +100,7 @@ def parse_args():
                       default=8, type=int)
   parser.add_argument('--checkpoint', dest='checkpoint',
                       help='checkpoint to load network',
-                      default=89999, type=int, required=True)
+                      default=132028, type=int)
   parser.add_argument('--bs', dest='batch_size',
                       help='batch_size',
                       default=1, type=int)
@@ -149,12 +158,229 @@ def _get_image_blob(im):
 
   return blob, np.array(im_scale_factors)
 
+
+# 提取跟物体第一帧算法实现-------------------------------------#
+import scipy
+from scipy import signal
+import matplotlib.pyplot as plt
+import glob
+import copy
+class First_Contact_Extract():
+   
+  def __init__(self, save_dir) -> None:
+     # (state:[0,1], bbox:[x,y])
+     self.contact_state_cache = {"L":[], "R":[]}
+     self.save_dir = save_dir
+
+  def skin_extract(self, image):
+    # image = cv2.imread("/mnt/cephfs/home/zhihongyan/llm4embodied/hand_object_detector/images_det/21127_det.png")
+    def color_segmentation():
+        lower_HSV_values = np.array([0, 40, 0], dtype="uint8")
+        upper_HSV_values = np.array([25, 255, 255], dtype="uint8")
+        lower_YCbCr_values = np.array((0, 138, 67), dtype="uint8")
+        upper_YCbCr_values = np.array((255, 173, 133), dtype="uint8")
+        mask_YCbCr = cv2.inRange(YCbCr_image, lower_YCbCr_values, upper_YCbCr_values)
+        mask_HSV = cv2.inRange(HSV_image, lower_HSV_values, upper_HSV_values)
+        binary_mask_image = cv2.add(mask_HSV, mask_YCbCr)
+        return binary_mask_image
+
+    HSV_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    YCbCr_image = cv2.cvtColor(image, cv2.COLOR_BGR2YCR_CB)
+    binary_mask_image = color_segmentation()
+    image_foreground = cv2.erode(binary_mask_image, None, iterations=3)
+    dilated_binary_image = cv2.dilate(binary_mask_image, None, iterations=3)
+    ret, image_background = cv2.threshold(dilated_binary_image, 1, 128, cv2.THRESH_BINARY)
+
+    image_marker = cv2.add(image_foreground, image_background)
+    image_marker32 = np.int32(image_marker)
+    cv2.watershed(image, image_marker32)
+    m = cv2.convertScaleAbs(image_marker32)
+    ret, image_mask = cv2.threshold(m, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = np.ones((20, 20), np.uint8)
+    image_mask = cv2.morphologyEx(image_mask, cv2.MORPH_CLOSE, kernel)
+    # cv2.imwrite("./test.png", image_mask)
+    return image_mask
+
+  def read_jsons(self, result_dir):
+    self.contact_state_cache = {"L":[], "R":[]}
+    for json_path in glob.glob(result_dir + "/*.json"):
+      with open(json_path, 'r') as f:
+        data = json.load(f)
+    return data
+
+  def do_savgol_filter(self, window_size=7, polyorder=2, vis=True):
+     '''
+        polyorder:多项式拟合系数，越小越接近原曲线，越大越平滑
+     '''
+     filter_contact_state_cache_l = scipy.signal.savgol_filter(self.contact_state_cache['L'], window_size, polyorder)
+     filter_contact_state_cache_r = scipy.signal.savgol_filter(self.contact_state_cache['R'], window_size, polyorder)
+     if vis:
+        x = np.linspace(1, len(self.contact_state_cache['L']) ,len(self.contact_state_cache['L']))
+        plt.plot(x, np.array(filter_contact_state_cache_l), 'r', label = 'l_savgol_filter')
+        plt.plot(x, np.array(self.contact_state_cache['L']), label = 'l_origin')
+        
+        x = np.linspace(1, len(self.contact_state_cache['R']) ,len(self.contact_state_cache['R']))
+        plt.plot(x, np.array(filter_contact_state_cache_r), 'b', label = 'r_savgol_filter')
+        plt.plot(x, np.array(self.contact_state_cache['R']), label = 'r_origin')
+        
+        plt.legend()
+        plt.savefig(f"{self.save_dir}/state.png")
+     return filter_contact_state_cache_l,filter_contact_state_cache_r
+
+  def record_contact_state_into_image(self, filter_contact_state_cache_l, filter_contact_state_cache_r):
+    image_path = os.path.join(self.save_dir, "*_contact.png")
+    state2text_map = {0: 'None', 1: 'first contact', 2: 'contact'}
+    new_filter_contact_state_cache_l = []
+    new_filter_contact_state_cache_r = []
+    for i in range(len(filter_contact_state_cache_l)):
+      if i == 0 :
+        # 第一帧如果是contact则是first contact
+        if filter_contact_state_cache_l[i]:
+          new_filter_contact_state_cache_l.append(1)
+        else:
+          new_filter_contact_state_cache_l.append(0)
+      elif filter_contact_state_cache_l[i] >= 0.75 and filter_contact_state_cache_l[i-1] < 0.75:
+          new_filter_contact_state_cache_l.append(1)
+      elif filter_contact_state_cache_l[i] >= 0.75 and filter_contact_state_cache_l[i-1] >= 0.75:
+          new_filter_contact_state_cache_l.append(2)
+      else:
+          new_filter_contact_state_cache_l.append(0)
+    for i in range(len(filter_contact_state_cache_r)):
+      if i == 0 :
+        # 第一帧如果是contact则是first contact
+        if filter_contact_state_cache_r[i]:
+          new_filter_contact_state_cache_r.append(1)
+        else:
+          new_filter_contact_state_cache_r.append(0)
+      elif filter_contact_state_cache_r[i] >= 0.75 and filter_contact_state_cache_r[i-1] < 0.75:
+          new_filter_contact_state_cache_r.append(1)
+      elif filter_contact_state_cache_r[i] >= 0.75 and filter_contact_state_cache_r[i-1] >= 0.75:
+          new_filter_contact_state_cache_r.append(2)
+      else:
+          new_filter_contact_state_cache_r.append(0)
+        
+    images = glob.glob(image_path)
+    images.sort(key=lambda x:int(x.split('/')[-1].split('_')[0]), reverse=True)
+    # assert len(images) == len(new_filter_contact_state_cache_r)
+    for j, img in tqdm.tqdm(enumerate(images), desc="record contact state into image"):
+      temp = cv2.imread(img)
+      ls = state2text_map[new_filter_contact_state_cache_l[j]]
+      cv2.putText(temp, f"Left_hand_state:[{ls}]", (5,50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 2)
+      rs = state2text_map[new_filter_contact_state_cache_r[j]]
+      cv2.putText(temp, f"Right_hand_state:[{rs}]", (5,100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 2)
+      cv2.imwrite(img, temp)
+      
+    pass
+       
+  def log_contact_state(self, hand_dets, obj_dets, origin_image):
+     '''
+        hand_dets: [boxes(4), score(1), state(1), offset_vector(3), left/right(1)]
+        obj_dets: [boxes(4), score(1), state(1), offset_vector(3), left/right(1)]
+     '''
+     log_left_hand_flag = False
+     log_right_hand_flag = False
+     contact_img = copy.deepcopy(origin_image)
+     
+     if not hand_dets is None: 
+      for i in range(len(hand_dets)):
+        # step1:处理contac状态---------------------------------#
+        # 3:接触可移动obj 4:没有接触可移动obj 0:没有接触
+        contact_state = hand_dets[i][5]
+        # 0:左手 1:右手
+        contact_hand = hand_dets[i][-1]
+        # 处理左手
+        if contact_hand == 0 and log_left_hand_flag==False:
+          log_left_hand_flag = True
+          # 没有和obj接触
+          if contact_state == 4 or contact_state == 0:
+            self.contact_state_cache['L'].append(0)
+          # 和obj接触
+          else:
+            self.contact_state_cache['L'].append(1)
+            # # 整个视频第一帧
+            # if len(self.contact_state_cache['L']) == 0 :
+            #   self.contact_state_cache['L'].append(1)
+            # # 上一帧不是第一帧接触
+            # elif self.contact_state_cache['L'][-1] == 0:
+            #   self.contact_state_cache['L'].append(1)
+            # # 上一帧是第一帧接触
+            # else:
+            #   self.contact_state_cache['L'].append(0)
+        # 处理右手      
+        else:
+          log_right_hand_flag = True
+          # 没有和obj接触
+          if contact_state == 4 or contact_state == 0:
+            self.contact_state_cache['R'].append(0)
+          # 和obj接触
+          else:
+            self.contact_state_cache['R'].append(1)
+            # # 整个视频第一帧
+            # if len(self.contact_state_cache['R']) == 0 :
+            #   self.contact_state_cache['R'].append(1)
+            # # 上一帧不是第一帧接触
+            # elif self.contact_state_cache['R'][-1] == 0:
+            #   self.contact_state_cache['R'].append(1)
+            # # 上一帧是第一帧接触
+            # else:
+            #   self.contact_state_cache['R'].append(0)
+          
+        
+        # step2:处理hand的bbox返回肤色的像素位置-------------------------#
+        # 如果有接触
+        if not obj_dets is None and not hand_dets is None:
+          if contact_state == 1 or contact_state == 3:
+            # bbox:[x0,y0,x1,y1]
+            hand_bbox = hand_dets[i][:4]
+            mask_img = copy.deepcopy(origin_image)
+            mask_img[0:int(hand_bbox[1]),:]=(0,0,0)
+            mask_img[int(hand_bbox[3]):,:]=(0,0,0)
+            mask_img[:,0:int(hand_bbox[0])]=(0,0,0)
+            mask_img[:,int(hand_bbox[2]):]=(0,0,0)
+            # 0:none 255:hand 
+            mask_hand = self.skin_extract(mask_img)
+            mask_indexs = np.where(mask_hand==255)
+            
+            obj_bbox = obj_dets[0][:4]
+            valid_contact_point_x = []
+            valid_contact_point_y = []
+            # mask_obj_img = copy.deepcopy(origin_image)
+            # mask_obj_img[int(obj_bbox[2]):int(obj_bbox[3]),int(obj_bbox[0]):int(obj_bbox[1])] = 1
+            for y,x in zip(mask_indexs[0], mask_indexs[1]):
+              if (int(obj_bbox[1])<= y and y <= int(obj_bbox[3])) and \
+                  (int(obj_bbox[0])<= x and x <= int(obj_bbox[2])):
+                  valid_contact_point_x.append(x)
+                  valid_contact_point_y.append(y)
+            # 平均所有的有效的点
+            if len(valid_contact_point_x) == 0 or len(valid_contact_point_y) == 0:
+              continue
+            avg_y, avg_x = sum(valid_contact_point_y)/len(valid_contact_point_y), sum(valid_contact_point_x)/len(valid_contact_point_x)
+            
+            cv2.circle(contact_img, (int(avg_x), int(avg_y)), 10, (0,255,0), -1)
+            pass
+          
+      if not log_left_hand_flag:
+          self.contact_state_cache['L'].append(0)
+      if not log_right_hand_flag:
+          self.contact_state_cache['R'].append(0)       
+            
+      return contact_img
+    
+     else:
+      self.contact_state_cache['L'].append(0)
+      self.contact_state_cache['R'].append(0)
+      return np.zeros_like(origin_image)
+
+
+
 if __name__ == '__main__':
 
   args = parse_args()
 
   # print('Called with args:')
   # print(args)
+
+  extractor = First_Contact_Extract(args.save_dir)
 
   if args.cfg_file is not None:
     cfg_from_file(args.cfg_file)
@@ -234,7 +460,25 @@ if __name__ == '__main__':
 
     webcam_num = args.webcam_num
     # Set up webcam or get image directories
-    if webcam_num >= 0 :
+    if args.mp4:
+      cap = cv2.VideoCapture(args.mp4_file)
+      imglist = []
+      fps = int(cap.get(cv2.CAP_PROP_FPS))
+      num_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+      print(num_frames)
+      print(fps)
+      n = 0
+      if args.debug:
+        num_frames = 50
+      lpbar = tqdm.tqdm(total=int(num_frames), desc="load mp4")
+      while n < num_frames:
+          #lpbar.update(1)
+          success, image = cap.read()
+          imglist.append(image)
+          lpbar.update(1)
+          n+=1
+      num_images = int(len(imglist))-1
+    elif webcam_num >= 0 :
       cap = cv2.VideoCapture(webcam_num)
       num_images = 0
     else:
@@ -246,17 +490,21 @@ if __name__ == '__main__':
     print('Loaded Photo: {} images.'.format(num_images))
 
 
+    pbar = tqdm.tqdm(total=num_images)
     while (num_images >= 0):
+        pbar.update(1)
         total_tic = time.time()
         if webcam_num == -1:
           num_images -= 1
 
         # Get image from the webcam
-        if webcam_num >= 0:
+        if webcam_num >= 0 :
           if not cap.isOpened():
             raise RuntimeError("Webcam could not open. Please check connection.")
           ret, frame = cap.read()
           im_in = np.array(frame)
+        elif args.mp4:
+          im_in = imglist[num_images]
         # Load the demo image
         else:
           im_file = os.path.join(args.image_dir, imglist[num_images])
@@ -384,8 +632,26 @@ if __name__ == '__main__':
             
             folder_name = args.save_dir
             os.makedirs(folder_name, exist_ok=True)
-            result_path = os.path.join(folder_name, imglist[num_images][:-4] + "_det.png")
+            if args.mp4:
+              result_path = os.path.join(folder_name, str(num_images) + "_det.png")
+              json_path = os.path.join(folder_name, str(num_images) + ".json")
+              with open(json_path, "w") as f:
+                json.dump({
+                            "hand_det":hand_dets.tolist() if hand_dets is not None else "none" ,
+                            "obj_det":obj_dets.tolist()  if obj_dets is not None else "none"
+                          },
+                          f
+                          )
+              contact_img = extractor.log_contact_state(hand_dets, obj_dets, np.copy(im))
+              contact_img_path = os.path.join(folder_name, str(num_images) + "_contact.png")
+              cv2.imwrite(contact_img_path, contact_img)
+                
+              
+            else:
+              result_path = os.path.join(folder_name, imglist[num_images][:-4] + "_det.png")
             im2show.save(result_path)
+            
+            
         else:
             im2showRGB = cv2.cvtColor(im2show, cv2.COLOR_BGR2RGB)
             cv2.imshow("frame", im2showRGB)
@@ -395,6 +661,9 @@ if __name__ == '__main__':
             print('Frame rate:', frame_rate)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+    
+    filter_contact_state_cache_l,filter_contact_state_cache_r = extractor.do_savgol_filter()
+    extractor.record_contact_state_into_image(filter_contact_state_cache_l, filter_contact_state_cache_r)
               
     if webcam_num >= 0:
         cap.release()
