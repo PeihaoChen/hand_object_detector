@@ -20,6 +20,7 @@ compare/
 
 # images/
 images_det/
+results/
 
 models/*
 predata_dandan/multitask/*.json

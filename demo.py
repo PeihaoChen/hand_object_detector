@@ -76,10 +76,10 @@ def parse_args():
                     action='store_true')
   parser.add_argument('--mp4_file',
                     help='directory to load video for demo',
-                    default="data/video/e19b1be3-8ee9-44cc-ae7d-99a3591ebba5.mp4")
+                    default="data/video/clip.mp4")
   parser.add_argument('--save_dir', dest='save_dir',
                       help='directory to save results',
-                      default="images_det")
+                      default="results/images_det")
   parser.add_argument('--cuda', dest='cuda', 
                       help='whether use CUDA',
                       action='store_true')
@@ -100,7 +100,7 @@ def parse_args():
                       default=8, type=int)
   parser.add_argument('--checkpoint', dest='checkpoint',
                       help='checkpoint to load network',
-                      default=89999, type=int)
+                      default=132028, type=int)
   parser.add_argument('--bs', dest='batch_size',
                       help='batch_size',
                       default=1, type=int)
@@ -167,9 +167,10 @@ import glob
 import copy
 class First_Contact_Extract():
    
-  def __init__(self) -> None:
+  def __init__(self, save_dir) -> None:
      # (state:[0,1], bbox:[x,y])
      self.contact_state_cache = {"L":[], "R":[]}
+     self.save_dir = save_dir
   
   # def load_dataset(self, dataset_path='./images_det/*.json'):
   #   #FIXME
@@ -216,8 +217,15 @@ class First_Contact_Extract():
     image_mask = cv2.morphologyEx(image_mask, cv2.MORPH_CLOSE, kernel)
     # cv2.imwrite("./test.png", image_mask)
     return image_mask
+  
+  def read_jsons(self, result_dir):
+    self.contact_state_cache = {"L":[], "R":[]}
+    for json_path in glob.glob(result_dir + "/*.json"):
+      with open(json_path, 'r') as f:
+        data = json.load(f)
+    return data
 
-  def do_savgol_filter(self, window_size=7, polyorder=6, vis=False):
+  def do_savgol_filter(self, window_size=7, polyorder=6, vis=True):
      '''
         polyorder:多项式拟合系数，越小越接近原曲线，越大越平滑
      '''
@@ -283,7 +291,6 @@ class First_Contact_Extract():
       
     pass
        
-
   def log_contact_state(self, hand_dets, obj_dets, origin_image):
      '''
         hand_dets: [boxes(4), score(1), state(1), offset_vector(3), left/right(1)]
@@ -392,7 +399,7 @@ if __name__ == '__main__':
   # print('Called with args:')
   # print(args)
 
-  extractor = First_Contact_Extract()
+  extractor = First_Contact_Extract(args.save_dir)
 
   if args.cfg_file is not None:
     cfg_from_file(args.cfg_file)
