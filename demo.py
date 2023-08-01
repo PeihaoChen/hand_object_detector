@@ -47,6 +47,10 @@ except NameError:
     xrange = range  # Python 3
 
 
+lr = cfg.TRAIN.LEARNING_RATE
+momentum = cfg.TRAIN.MOMENTUM
+weight_decay = cfg.TRAIN.WEIGHT_DECAY
+
 
 def parse_args():
   """
@@ -105,9 +109,8 @@ def parse_args():
   parser.add_argument('--bs', dest='batch_size',
                       help='batch_size',
                       default=1, type=int)
-  parser.add_argument('--vis', dest='vis',
-                      help='visualization mode',
-                      default=True)
+  parser.add_argument('--vis', dest='vis', action='store_true',
+                      help='visualization mode',)
   parser.add_argument('--webcam_num', dest='webcam_num',
                       help='webcam ID number',
                       default=-1, type=int)
@@ -117,13 +120,13 @@ def parse_args():
   parser.add_argument('--thresh_obj', default=0.5,
                       type=float,
                       required=False)
+  parser.add_argument('--max_frame', default=-1,
+                      type=int)
+
 
   args = parser.parse_args()
   return args
 
-lr = cfg.TRAIN.LEARNING_RATE
-momentum = cfg.TRAIN.MOMENTUM
-weight_decay = cfg.TRAIN.WEIGHT_DECAY
 
 def _get_image_blob(im):
   """Converts an image into a network input.
@@ -160,13 +163,9 @@ def _get_image_blob(im):
   return blob, np.array(im_scale_factors)
 
 
-
 if __name__ == '__main__':
 
   args = parse_args()
-
-  # print('Called with args:')
-  # print(args)
 
   extractor = First_Contact_Extract(args.save_dir)
 
@@ -174,7 +173,6 @@ if __name__ == '__main__':
     cfg_from_file(args.cfg_file)
   if args.set_cfgs is not None:
     cfg_from_list(args.set_cfgs)
-
   cfg.USE_GPU_NMS = args.cuda
   np.random.seed(cfg.RNG_SEED)
 
@@ -243,11 +241,7 @@ if __name__ == '__main__':
     thresh_obj = args.thresh_obj
     vis = args.vis
 
-    # print(f'thresh_hand = {thresh_hand}')
-    # print(f'thnres_obj = {thresh_obj}')
-
-    webcam_num = args.webcam_num
-    # Set up webcam or get image directories
+    # Get image from directory or mp4
     if args.mp4:
       cap = cv2.VideoCapture(args.mp4_file)
       imglist = []
@@ -256,8 +250,8 @@ if __name__ == '__main__':
       print(num_frames)
       print(fps)
       n = 0
-      if args.debug:
-        num_frames = 3000
+      if args.max_frame != -1:
+        num_frames = args.max_frame
       lpbar = tqdm.tqdm(total=int(num_frames), desc="load mp4")
       while n < num_frames:
           #lpbar.update(1)
@@ -266,36 +260,25 @@ if __name__ == '__main__':
           lpbar.update(1)
           n+=1
       num_images = int(len(imglist))-1
-    elif webcam_num >= 0 :
-      cap = cv2.VideoCapture(webcam_num)
-      num_images = 0
     else:
       print(f'image dir = {args.image_dir}')
       print(f'save dir = {args.save_dir}')
       imglist = os.listdir(args.image_dir)
+      imglist = sorted(imglist, key=lambda filename: int(filename.split('.')[0]))
+      if args.max_frame != -1:
+        imglist = imglist[:args.max_frame]
       num_images = len(imglist)
 
     print('Loaded Photo: {} images.'.format(num_images))
 
-
-    pbar = tqdm.tqdm(total=num_images)
-    while (num_images >= 0):
-        pbar.update(1)
-        total_tic = time.time()
-        if webcam_num == -1:
-          num_images -= 1
-
-        # Get image from the webcam
-        if webcam_num >= 0 :
-          if not cap.isOpened():
-            raise RuntimeError("Webcam could not open. Please check connection.")
-          ret, frame = cap.read()
-          im_in = np.array(frame)
-        elif args.mp4:
-          im_in = imglist[num_images]
-        # Load the demo image
+    index = -1
+    for image in tqdm.tqdm((imglist), desc="detecting"):
+        index += 1
+        # Load image
+        if args.mp4:
+          im_in = image
         else:
-          im_file = os.path.join(args.image_dir, imglist[num_images])
+          im_file = os.path.join(args.image_dir, image)
           im_in = cv2.imread(im_file)
         # bgr
         im = im_in
@@ -411,48 +394,31 @@ if __name__ == '__main__':
         misc_toc = time.time()
         nms_time = misc_toc - misc_tic
 
-        if webcam_num == -1:
-            sys.stdout.write('im_detect: {:d}/{:d} {:.3f}s {:.3f}s   \r' \
-                            .format(num_images + 1, len(imglist), detect_time, nms_time))
-            sys.stdout.flush()
+        # sys.stdout.write('im_detect: {:d}/{:d} {:.3f}s {:.3f}s   \r' \
+        #                 .format(num_images + 1, len(imglist), detect_time, nms_time))
+        # sys.stdout.flush()
 
-        if vis and webcam_num == -1:
-            
-            folder_name = args.save_dir
-            os.makedirs(folder_name, exist_ok=True)
-            if args.mp4:
-              result_path = os.path.join(folder_name, str(num_images) + "_det.png")
-              json_path = os.path.join(folder_name, str(num_images) + ".json")
-              with open(json_path, "w") as f:
-                json.dump({
-                            "hand_det":hand_dets.tolist() if hand_dets is not None else "none" ,
-                            "obj_det":obj_dets.tolist()  if obj_dets is not None else "none"
-                          },
-                          f
-                          )
-              contact_img = extractor.log_contact_state(hand_dets, obj_dets, np.copy(im))
-              contact_img_path = os.path.join(folder_name, str(num_images) + "_contact.png")
-              cv2.imwrite(contact_img_path, contact_img)
-                
-              
-            else:
-              result_path = os.path.join(folder_name, imglist[num_images][:-4] + "_det.png")
-            im2show.save(result_path)
-            
-            
+        # save result json
+        if args.mp4:
+           img_id = str(index)
         else:
-            im2showRGB = cv2.cvtColor(im2show, cv2.COLOR_BGR2RGB)
-            cv2.imshow("frame", im2showRGB)
-            total_toc = time.time()
-            total_time = total_toc - total_tic
-            frame_rate = 1 / total_time
-            print('Frame rate:', frame_rate)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+           img_id = image[:-4]
+        folder_name = args.save_dir
+        os.makedirs(folder_name, exist_ok=True)
+        json_path = os.path.join(folder_name, img_id + ".json")
+        result = { "hand_det": hand_dets.tolist() if hand_dets is not None else "none" ,
+                    "obj_det": obj_dets.tolist()  if obj_dets is not None else "none"}
+        with open(json_path, "w") as f:
+          json.dump(result, f)
+
+        # save result image
+        if vis:
+            result_path = os.path.join(folder_name, img_id + "_det.png")
+            contact_img_path = os.path.join(folder_name, img_id + "_contact.png")
+
+            contact_img = extractor.log_contact_state(hand_dets, obj_dets, np.copy(im))
+            cv2.imwrite(contact_img_path, contact_img)
+            im2show.save(result_path)           
     
     filter_contact_state_cache_l,filter_contact_state_cache_r = extractor.do_savgol_filter()
     extractor.record_contact_state_into_image(filter_contact_state_cache_l, filter_contact_state_cache_r)
-              
-    if webcam_num >= 0:
-        cap.release()
-        cv2.destroyAllWindows()
