@@ -56,26 +56,29 @@ class First_Contact_Extract():
         data = json.load(f)
     return data
 
-  def do_savgol_filter(self, window_size=7, polyorder=6, vis=True):
+  def do_savgol_filter(self, window_size=7, polyorder=3, vis=True):
      '''
-        polyorder:多项式拟合系数，越小越接近原曲线，越大越平滑
+        polyorder:多项式拟合系数，越大越接近原曲线，越小越平滑
      '''
      filter_contact_state_cache_l = scipy.signal.savgol_filter(self.contact_state_cache['L'], window_size, polyorder)
      filter_contact_state_cache_r = scipy.signal.savgol_filter(self.contact_state_cache['R'], window_size, polyorder)
      if vis:
+        plt.figure()
         x = np.linspace(1, len(self.contact_state_cache['L']) ,len(self.contact_state_cache['L']))
         plt.plot(x, np.array(filter_contact_state_cache_l), 'r', label = 'l_savgol_filter')
         plt.plot(x, np.array(self.contact_state_cache['L']), label = 'l_origin')
-        
+        plt.legend()
+        plt.savefig("./state_left.png")
+
+        plt.figure()
         x = np.linspace(1, len(self.contact_state_cache['R']) ,len(self.contact_state_cache['R']))
         plt.plot(x, np.array(filter_contact_state_cache_r), 'b', label = 'r_savgol_filter')
         plt.plot(x, np.array(self.contact_state_cache['R']), label = 'r_origin')
-        
         plt.legend()
-        plt.savefig("./state.png")
+        plt.savefig("./state_right.png")
      return filter_contact_state_cache_l,filter_contact_state_cache_r
 
-  def record_contact_state_into_image(self, filter_contact_state_cache_l, filter_contact_state_cache_r, image_path="./images_det/*_contact.png"):
+  def record_contact_state_into_image(self, filter_contact_state_cache_l, filter_contact_state_cache_r):
     state2text_map = {0: 'None', 1: 'first contact', 2: 'contact'}
     new_filter_contact_state_cache_l = []
     new_filter_contact_state_cache_r = []
@@ -106,6 +109,7 @@ class First_Contact_Extract():
       else:
           new_filter_contact_state_cache_r.append(0)
         
+    image_path = f"{self.save_dir}/*_contact.png"
     images = glob.glob(image_path)
     images.sort(key=lambda x:int(x.split('/')[-1].split('_')[0]), reverse=True)
     # assert len(images) == len(new_filter_contact_state_cache_r)
@@ -119,9 +123,8 @@ class First_Contact_Extract():
       rs = state2text_map[new_filter_contact_state_cache_r[j]]
       cv2.putText(temp, f"Right_hand_state:[{rs}]", (5,100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 2)
       cv2.imwrite(img, temp)
-      
-    pass
-       
+
+
   def log_contact_state(self, hand_dets, obj_dets, origin_image):
      '''
         hand_dets: [boxes(4), score(1), state(1), offset_vector(3), left/right(1)]
@@ -129,49 +132,53 @@ class First_Contact_Extract():
      '''
      log_left_hand_flag = False
      log_right_hand_flag = False
-     contact_img = copy.deepcopy(origin_image)
+     contact_point = {
+      "left": None,
+      "right": None 
+     }
+    #  contact_img = copy.deepcopy(origin_image)
      
      if not hand_dets is None: 
          
-      # 使用sam去补偿没有检测到的obj bbox
-      if obj_dets is None:
-          # TODO:offset怎么用呢
-          obj_center = None
-          sam_obj_mask = self.SAM.call_sam_to_general_mask()
-          sam_obj_bbox = self.SAM.match_obj(sam_obj_mask)
-          obj_dets = [sam_obj_bbox,0,0,0,0,0,0]
-          pass
+      # # 使用sam去补偿没有检测到的obj bbox
+      # if obj_dets is None:
+      #     # TODO:offset怎么用呢
+      #     obj_center = None
+      #     sam_obj_mask = self.SAM.call_sam_to_general_mask(origin_image)
+      #     sam_obj_bbox = self.SAM.match_obj(sam_obj_mask)
+      #     obj_dets = [sam_obj_bbox,0,0,0,0,0,0]
+      #     pass
           
              
       for i in range(len(hand_dets)):
         # step1:处理contac状态---------------------------------#
-        # 3:接触可移动obj 4:没有接触可移动obj 0:没有接触
+        # 3:接触可移动obj 4:接触不可移动obj 0:没有接触
         contact_state = hand_dets[i][5]
         # 0:左手 1:右手
-        contact_hand = hand_dets[i][-1]
+        contact_hand = "left" if hand_dets[i][-1]==0 else "right"
         # 处理左手
-        if contact_hand == 0 and log_left_hand_flag==False:
+        if contact_hand == "left" and log_left_hand_flag==False:
           log_left_hand_flag = True
-          # 没有和obj接触
-          if contact_state == 4 or contact_state == 0:
-            self.contact_state_cache['L'].append(0)
           # 和obj接触
-          else:
+          if contact_state == 3 or contact_state == 4:
             self.contact_state_cache['L'].append(1)
-        # 处理右手      
-        elif log_right_hand_flag==False:
-          log_right_hand_flag = True
           # 没有和obj接触
-          if contact_state == 4 or contact_state == 0:
-            self.contact_state_cache['R'].append(0)
-          # 和obj接触
           else:
+            self.contact_state_cache['L'].append(0)
+        # 处理右手      
+        elif contact_hand == "right" and log_right_hand_flag==False:
+          log_right_hand_flag = True
+          # 和obj接触
+          if contact_state == 3 or contact_state == 4:
             self.contact_state_cache['R'].append(1)
+          # 没有和obj接触
+          else:
+            self.contact_state_cache['R'].append(0)
           
         # step2:处理hand的bbox返回肤色的像素位置-------------------------#
         # 如果有接触
         if not obj_dets is None and not hand_dets is None:
-          if contact_state == 1 or contact_state == 3:
+          if contact_state == 3 or contact_state == 4:
             # bbox:[x0,y0,x1,y1]
             hand_bbox = hand_dets[i][:4]
             mask_img = copy.deepcopy(origin_image)
@@ -196,28 +203,37 @@ class First_Contact_Extract():
             # 平均所有的有效的点
             if len(valid_contact_point_x) == 0 or len(valid_contact_point_y) == 0:
               continue
-            avg_y, avg_x = sum(valid_contact_point_y)/len(valid_contact_point_y), sum(valid_contact_point_x)/len(valid_contact_point_x)
-            
-            cv2.circle(contact_img, (int(avg_x), int(avg_y)), 10, (0,255,0), -1)
-            pass
+            contact_point[contact_hand] = sum(valid_contact_point_y)/len(valid_contact_point_y), sum(valid_contact_point_x)/len(valid_contact_point_x)
+
+            # cv2.circle(contact_img, (int(avg_x), int(avg_y)), 10, (0,255,0), -1)
+            # pass
           
       if not log_left_hand_flag:
           self.contact_state_cache['L'].append(0)
       if not log_right_hand_flag:
           self.contact_state_cache['R'].append(0)       
             
-      return contact_img
+      return contact_point
     
      else:
       self.contact_state_cache['L'].append(0)
       self.contact_state_cache['R'].append(0)
-      return np.zeros_like(origin_image)
+      # return np.zeros_like(origin_image)
+      return contact_point
+
+  def draw_contact_point(self, contact_point, origin_image):
+    contact_img = copy.deepcopy(origin_image)
+    for hand in ["right", "left"]:
+      point = contact_point[hand]
+      if point is not None:    
+        cv2.circle(contact_img, (int(point[1]), int(point[0])), 10, (0,255,0), -1)
+    return contact_img  
 
 
 class SAM:
     
     def __init__(self) -> None:
-       self.CACHA_DIR = "tools/Semantic-SAM/CACHE"
+       self.CACHE_DIR = "tools/Semantic-SAM/CACHE"
        
     def call_sam_to_general_mask(self, img):
         if not os.path.exists(self.CACHE_DIR):

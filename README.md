@@ -1,3 +1,10 @@
+## Note
+hand_det[:4] # hand position
+hand_det[4] # detection confidence score
+hand_det[5] # contact state: 3:接触可移动obj 4:接触不可移动obj 0:没有接触
+hand_det[6:9] # offset of contact object
+hand_det[9] # left (0) or right (1)
+
 # Hand Object Detector 
 This is the code for our paper *Understanding Human Hands in Contact at Internet Scale* (CVPR 2020, **Oral**).
 

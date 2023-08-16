@@ -265,6 +265,7 @@ if __name__ == '__main__':
       print(f'save dir = {args.save_dir}')
       imglist = os.listdir(args.image_dir)
       imglist = sorted(imglist, key=lambda filename: int(filename.split('.')[0]))
+      # imglist = [imglist[10]]
       if args.max_frame != -1:
         imglist = imglist[:args.max_frame]
       num_images = len(imglist)
@@ -394,10 +395,9 @@ if __name__ == '__main__':
         misc_toc = time.time()
         nms_time = misc_toc - misc_tic
 
-        # sys.stdout.write('im_detect: {:d}/{:d} {:.3f}s {:.3f}s   \r' \
-        #                 .format(num_images + 1, len(imglist), detect_time, nms_time))
-        # sys.stdout.flush()
-
+        # post-processing
+        contact_point = extractor.log_contact_state(hand_dets, obj_dets, np.copy(im))
+        
         # save result json
         if args.mp4:
            img_id = str(index)
@@ -406,8 +406,10 @@ if __name__ == '__main__':
         folder_name = args.save_dir
         os.makedirs(folder_name, exist_ok=True)
         json_path = os.path.join(folder_name, img_id + ".json")
-        result = { "hand_det": hand_dets.tolist() if hand_dets is not None else "none" ,
-                    "obj_det": obj_dets.tolist()  if obj_dets is not None else "none"}
+        result = { "hand_det": hand_dets.tolist() if hand_dets is not None else None,
+                    "obj_det": obj_dets.tolist()  if obj_dets is not None else None,
+                    "contact_point": contact_point,
+                    }
         with open(json_path, "w") as f:
           json.dump(result, f)
 
@@ -416,7 +418,8 @@ if __name__ == '__main__':
             result_path = os.path.join(folder_name, img_id + "_det.png")
             contact_img_path = os.path.join(folder_name, img_id + "_contact.png")
 
-            contact_img = extractor.log_contact_state(hand_dets, obj_dets, np.copy(im))
+            # contact_img = extractor.log_contact_state(hand_dets, obj_dets, np.copy(im))
+            contact_img = extractor.draw_contact_point(contact_point, np.copy(im))
             cv2.imwrite(contact_img_path, contact_img)
             im2show.save(result_path)           
     
