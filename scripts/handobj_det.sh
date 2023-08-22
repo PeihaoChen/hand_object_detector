@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=1 python demo.py --cuda --image_dir ~/AICD/AICDzhnf/data/EPIC_clip --save_dir results/EPIC --all_video --no_repeat

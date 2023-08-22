@@ -24,6 +24,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F 
 from PIL import Image
+import glob
 
 import torchvision.transforms as transforms
 import torchvision.datasets as dset
@@ -122,6 +123,8 @@ def parse_args():
                       required=False)
   parser.add_argument('--max_frame', default=-1,
                       type=int)
+  parser.add_argument('--all_video', action='store_true')
+  parser.add_argument('--no_repeat', action='store_true')
 
 
   args = parser.parse_args()
@@ -163,10 +166,15 @@ def _get_image_blob(im):
   return blob, np.array(im_scale_factors)
 
 
-if __name__ == '__main__':
+def check_existing(imglist, save_dir, no_repeat):
+  if no_repeat:
+    existing_file = glob.glob(f"{save_dir}/*.json")
+    existing_file = [os.path.basename(file).replace("json", "jpg") for file in existing_file]
+    imglist = list(set(imglist) - set(existing_file))
+  return imglist
 
-  args = parse_args()
 
+def extract_one_dir(args):
   extractor = First_Contact_Extract(args.save_dir)
 
   if args.cfg_file is not None:
@@ -268,7 +276,11 @@ if __name__ == '__main__':
       # imglist = [imglist[10]]
       if args.max_frame != -1:
         imglist = imglist[:args.max_frame]
+      imglist = check_existing(imglist, args.save_dir, args.no_repeat)
       num_images = len(imglist)
+      if num_images == 0:
+        print("No image, pass")
+        return
 
     print('Loaded Photo: {} images.'.format(num_images))
 
@@ -425,3 +437,26 @@ if __name__ == '__main__':
     
     filter_contact_state_cache_l,filter_contact_state_cache_r = extractor.do_savgol_filter()
     extractor.record_contact_state_into_image(filter_contact_state_cache_l, filter_contact_state_cache_r)
+
+
+if __name__ == '__main__':
+
+  args = parse_args()
+  if not args.all_video:
+    extract_one_dir(args)
+  else:
+    image_dirs = glob.glob(f"{args.image_dir}/*")
+    image_dirs.sort()
+    save_dir_base = args.save_dir
+    for image_dir in image_dirs:
+      video_id = os.path.basename(image_dir)
+      args.image_dir = image_dir
+      args.save_dir = os.path.join(save_dir_base, video_id)
+      print(f"Extracting {args.image_dir}\nSaving to {args.save_dir}")
+      # extract_one_dir(args)
+      try:
+        extract_one_dir(args)
+      except Exception as ex:
+        print("bug!!\n")
+        print(ex)
+  

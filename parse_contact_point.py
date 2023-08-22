@@ -16,20 +16,23 @@ def read_jsons(result_dir):
     # json_files = json_files[-10:]
     image_files = [os.path.basename(file).replace(".json", ".jpg") for file in json_files]
     detections = []
+    detections_dict = {}
     for json_file in json_files:
         with open(json_file, 'r') as f:
             data = json.load(f) # data is a dict with key "hand_det" and "obj_det"
             detections.append(data)
+            detections_dict[os.path.basename(json_file).split(".")[0]] = data
+    json.dump(detections_dict, open(f"{result_dir}_merged.json", "w"))
     return detections, image_files
 
 
-def read_imgs(image_dir, image_files):
-    images = []
+def parse_img_files(image_dir, image_files):
+    img_files = []
     for image_file in tqdm.tqdm(image_files, desc="read images"):
         image_path = os.path.join(image_dir, image_file)
-        image = cv2.imread(image_path)
-        images.append(image)
-    return images
+        # image = cv2.imread(image_path)
+        img_files.append(image_path)
+    return img_files
 
 
 def _calculate_center(bb):
@@ -166,7 +169,11 @@ def get_homography(img1, img2):
         pt1[i,:] = kp1[p.queryIdx].pt
         pt2[i,:] = kp2[p.trainIdx].pt
 
-    h, mask = cv2.findHomography(pt1, pt2, cv2.RANSAC)
+    if len(good_matches) >= 4:
+        h, mask = cv2.findHomography(pt1, pt2, cv2.RANSAC)
+    else:
+        h, mask = None, None
+        print(f"The match points are less than 4, cannot calculate homography matrix!")
 
     # H,W,C = img1.shape
     # img_warp = cv2.warpPerspective(img1, h, (W, H))
@@ -214,7 +221,7 @@ def parse_contact_state(detections):
     return contact_state_cache
 
 
-def parse_contact_point(contact_state_cache, detections, imgs):
+def parse_contact_point(contact_state_cache, detections, img_files):
     num_frame = len(contact_state_cache['L'])
     contact_point_cache = {
         "L" : [None] * num_frame,
@@ -229,30 +236,46 @@ def parse_contact_point(contact_state_cache, detections, imgs):
                 hand_dets = detections[index_frame]['hand_det']
                 obj_dets = detections[index_frame]['obj_det']
                 hand_det = [hand for hand in hand_dets if hand[-1] == hand_indicator][0]    # select the first left or right hand
-                contact_point = _contact_point(obj_dets, hand_det, imgs[index_frame])
+                img = cv2.imread(img_files[index_frame])
+                contact_point = _contact_point(obj_dets, hand_det, img)
                 contact_point_cache[hand][index_frame] = contact_point
 
     return contact_point_cache
 
 
-def parse_homography(imgs):
-    img_homography_cache = []
-    for img_index in tqdm.tqdm(range(len(imgs)-1), desc="parse transformation"):
-        homography_matrix = get_homography(imgs[img_index+1], imgs[img_index])
-        img_homography_cache.append(homography_matrix.tolist())
+def parse_homography(img_files):
+    """
+    img_homography_cache[ind] indicates the homography matrix from img_files[ind+1] to img_files[ind]
+    """
+    img_homography_cache = [None] * len(img_files)
+    curr_img = cv2.imread(img_files[0])
+    for img_index in tqdm.tqdm(range(len(img_files)-1), desc="parse transformation"):
+        next_img = cv2.imread(img_files[img_index+1])
+        homography_matrix = get_homography(next_img, curr_img)
+        homography_matrix = homography_matrix.tolist() if homography_matrix is not None else None
+        img_homography_cache[img_index] = homography_matrix
+        curr_img = next_img
     return img_homography_cache
 
 
 if __name__ == "__main__":
-    detection_dir = '/home/winnie/chenpeihao/Projects/hand_object_detector/results/debug'
-    image_dir = '/home/winnie/AICD/AICDzhnf/data/EPIC_clip/P01_102'
-    detections, image_files = read_jsons(detection_dir)
-    imgs = read_imgs(image_dir, image_files)
+    detected_videos = os.listdir('/home/winnie/chenpeihao/Projects/hand_object_detector/results/EPIC_handobj_frame')
+    detected_videos.sort(reverse=False)
+    print(detected_videos)
+    for detected_video in detected_videos:
+        print(f"processing {detected_video}")
+        detection_dir = f'/home/winnie/chenpeihao/Projects/hand_object_detector/results/EPIC_handobj_frame/{detected_video}'
+        image_dir = f'/home/winnie/AICD/AICDzhnf/data/EPIC_clip/{detected_video}'
+        if not os.path.isdir(detection_dir):
+            continue
 
-    contact_state_cache = parse_contact_state(detections)
-    contact_point_cache = parse_contact_point(contact_state_cache, detections, imgs)
-    print(contact_state_cache)
-    print(contact_point_cache)
-    img_homography_cache = parse_homography(imgs)
-    result = {"contact_states": contact_state_cache, "contact_points": contact_point_cache, "img_homography": img_homography_cache}
-    json.dump(result, open("results/EPIC/P01_102.json", 'w'))
+        detections, image_files = read_jsons(detection_dir)
+        img_files = parse_img_files(image_dir, image_files)
+
+        contact_state_cache = parse_contact_state(detections)
+        contact_point_cache = parse_contact_point(contact_state_cache, detections, img_files)
+        print(contact_state_cache)
+        print(contact_point_cache)
+        img_homography_cache = parse_homography(img_files)
+        result = {"contact_states": contact_state_cache, "contact_points": contact_point_cache, "img_homography": img_homography_cache}
+        json.dump(result, open(f"results/EPIC_handobj_video/{detected_video}.json", 'w'))
